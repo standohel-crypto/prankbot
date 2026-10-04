@@ -24,7 +24,7 @@ SERVER_URL = os.getenv(
 
 PAIRING_KEY = os.getenv(
     "PAIRING_KEY",
-    "CHANGE_ME"
+    "Nurdix_Prank_2026_7xK91"
 )
 
 events = queue.Queue()
