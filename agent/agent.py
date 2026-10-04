@@ -19,7 +19,7 @@ APP_NAME = "PrankBot Agent"
 # wss://prankbot-cloud-xxxx.onrender.com/ws
 SERVER_URL = os.getenv(
     "PRANKBOT_SERVER_URL",
-    "wss://YOUR-SERVER.onrender.com/ws"
+    "wss://prankbot-gmz7.onrender.com/ws"
 )
 
 PAIRING_KEY = os.getenv(
