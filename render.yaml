@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: prankbot-cloud
+    runtime: docker
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: LOGIN_PASSWORD
+        value: Nurda2020
+      - key: PAIRING_KEY
+        sync: false

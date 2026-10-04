@@ -1,0 +1,35 @@
+name: Build Windows Agent
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install -r agent/requirements.txt
+
+      - name: Install Inno Setup
+        run: choco install innosetup -y
+
+      - name: Build Agent EXE
+        run: |
+          python -m PyInstaller --noconfirm --clean --onefile --windowed --name PrankBotAgent --paths agent agent/agent.py
+
+      - name: Build installer
+        run: |
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer\AgentSetup.iss
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PrankBotAgentSetup
+          path: output/PrankBotAgentSetup.exe
