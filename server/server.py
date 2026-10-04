@@ -1,11 +1,13 @@
 import asyncio
 import json
+import logging
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict
 
 from aiohttp import web
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.error import BadRequest
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "PASTE_BOT_TOKEN_HERE")
@@ -15,10 +17,12 @@ PAIRING_KEY = os.getenv("PAIRING_KEY", "CHANGE_ME")
 HOST = "0.0.0.0"
 PORT = int(os.getenv("PORT", "10000"))
 
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+
+
 authorized_chats = set()
 devices: Dict[str, "Device"] = {}
 
-# Сервер управляет только именами заранее встроенных безопасных действий.
 ENABLED_ACTIONS = {
     "warning": "⚠️ Warning",
     "error": "❌ Error",
@@ -37,6 +41,7 @@ class Device:
     device_id: str
     name: str
     ws: web.WebSocketResponse
+    send_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
 def main_menu():
@@ -52,23 +57,23 @@ def device_menu(device_id: str):
 
     for i in range(0, len(actions), 2):
         row = []
-        for action, title in actions[i:i+2]:
-            row.append(
-                InlineKeyboardButton(
-                    title,
-                    callback_data=f"cmd:{device_id}:{action}"
-                )
-            )
+        for action, title in actions[i:i + 2]:
+            row.append(InlineKeyboardButton(title, callback_data=f"cmd:{device_id}:{action}"))
         rows.append(row)
 
-    rows.append([
-        InlineKeyboardButton(
-            "📡 Status",
-            callback_data=f"cmd:{device_id}:status"
-        )
-    ])
+    rows.append([InlineKeyboardButton("📡 Status", callback_data=f"cmd:{device_id}:status")])
     rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="devices")])
     return InlineKeyboardMarkup(rows)
+
+
+async def safe_edit(q, text, reply_markup=None):
+    try:
+        await q.edit_message_text(text, reply_markup=reply_markup)
+    except BadRequest as exc:
+        # Rapid double clicks often try to set exactly the same text/keyboard.
+        # This is harmless and must not be treated as a connection failure.
+        if "Message is not modified" not in str(exc):
+            raise
 
 
 async def login(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -81,10 +86,7 @@ async def login(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     authorized_chats.add(update.effective_chat.id)
-    await update.message.reply_text(
-        "✅ Вход выполнен",
-        reply_markup=main_menu()
-    )
+    await update.message.reply_text("✅ Вход выполнен", reply_markup=main_menu())
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -92,10 +94,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("🔐 Сначала /login пароль")
         return
 
-    await update.message.reply_text(
-        "🎛 PrankBot Cloud",
-        reply_markup=main_menu()
-    )
+    await update.message.reply_text("🎛 PrankBot Cloud", reply_markup=main_menu())
 
 
 async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -105,95 +104,67 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.answer("Сначала /login пароль", show_alert=True)
         return
 
-    await q.answer()
     data = q.data or ""
 
     if data == "home":
-        await q.edit_message_text(
-            "🎛 PrankBot Cloud",
-            reply_markup=main_menu()
-        )
+        await q.answer()
+        await safe_edit(q, "🎛 PrankBot Cloud", reply_markup=main_menu())
         return
 
     if data == "devices":
+        await q.answer()
         if not devices:
-            await q.edit_message_text(
-                "Нет подключённых устройств.",
-                reply_markup=main_menu()
-            )
+            await safe_edit(q, "Нет подключённых устройств.", reply_markup=main_menu())
             return
 
-        rows = [
-            [
-                InlineKeyboardButton(
-                    f"🟢 {dev.name}",
-                    callback_data=f"device:{device_id}"
-                )
-            ]
-            for device_id, dev in sorted(
-                devices.items(),
-                key=lambda x: x[1].name.lower()
-            )
-        ]
-        rows.append([
-            InlineKeyboardButton("⬅️ Назад", callback_data="home")
-        ])
-
-        await q.edit_message_text(
-            "Выбери ПК:",
-            reply_markup=InlineKeyboardMarkup(rows)
-        )
+        rows = [[InlineKeyboardButton(f"🟢 {dev.name}", callback_data=f"device:{device_id}")]
+                for device_id, dev in sorted(devices.items(), key=lambda x: x[1].name.lower())]
+        rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="home")])
+        await safe_edit(q, "Выбери ПК:", reply_markup=InlineKeyboardMarkup(rows))
         return
 
     if data.startswith("device:"):
+        await q.answer()
         device_id = data.split(":", 1)[1]
         dev = devices.get(device_id)
-
         if not dev:
-            await q.edit_message_text(
-                "🔴 ПК оффлайн.",
-                reply_markup=main_menu()
-            )
+            await safe_edit(q, "🔴 ПК оффлайн.", reply_markup=main_menu())
             return
 
-        await q.edit_message_text(
-            f"🖥 {dev.name}\nСтатус: 🟢 онлайн",
-            reply_markup=device_menu(device_id)
-        )
+        await safe_edit(q, f"🖥 {dev.name}\nСтатус: 🟢 онлайн", reply_markup=device_menu(device_id))
         return
 
     if data.startswith("cmd:"):
         _, device_id, action = data.split(":", 2)
 
         if action not in ENABLED_ACTIONS:
-            await q.edit_message_text("❌ Действие отключено.")
+            await q.answer("❌ Действие отключено.", show_alert=True)
             return
 
         dev = devices.get(device_id)
-
         if not dev:
-            await q.edit_message_text(
-                "🔴 ПК уже отключился.",
-                reply_markup=main_menu()
-            )
+            await q.answer("🔴 ПК уже отключился.", show_alert=True)
             return
 
         try:
-            await dev.ws.send_json({
-                "type": "action",
-                "name": action,
-            })
+            # Serialize writes to one WebSocket. Rapid double-clicks can now
+            # queue safely instead of racing two sends against each other.
+            async with dev.send_lock:
+                await asyncio.wait_for(
+                    dev.ws.send_json({"type": "action", "name": action}),
+                    timeout=5,
+                )
 
-            await q.edit_message_text(
-                f"✅ {ENABLED_ACTIONS[action]} отправлено на {dev.name}",
-                reply_markup=device_menu(device_id)
-            )
-        except Exception:
-            devices.pop(device_id, None)
-            await q.edit_message_text(
-                "❌ Связь потеряна.",
-                reply_markup=main_menu()
-            )
+            await q.answer(f"✅ {ENABLED_ACTIONS[action]} отправлено")
+        except Exception as exc:
+            logging.warning("Send to %s failed: %r", device_id, exc)
+            current = devices.get(device_id)
+            if current is dev:
+                devices.pop(device_id, None)
+            await q.answer("❌ Связь потеряна.", show_alert=True)
+        return
+
+    await q.answer()
 
 
 async def health_handler(request):
@@ -205,14 +176,13 @@ async def health_handler(request):
 
 
 async def root_handler(request):
-    return web.Response(
-        text="PrankBot Cloud is running",
-        content_type="text/plain"
-    )
+    return web.Response(text="PrankBot Cloud is running", content_type="text/plain")
 
 
 async def websocket_handler(request):
-    ws = web.WebSocketResponse(heartbeat=20)
+    # The old 20s heartbeat was unnecessarily aggressive for a cloud/free
+    # connection. The agent also sends a real text ping every 10 seconds.
+    ws = web.WebSocketResponse(heartbeat=60, autoping=True, autoclose=True)
     await ws.prepare(request)
 
     device_id = None
@@ -238,11 +208,12 @@ async def websocket_handler(request):
         old = devices.get(device_id)
         if old and old.ws is not ws:
             try:
-                await old.ws.close()
+                await old.ws.close(code=4000, message=b"replaced")
             except Exception:
                 pass
 
         devices[device_id] = Device(device_id, name, ws)
+        logging.info("Device online: %s (%s)", name, device_id)
 
         await ws.send_json({
             "type": "registered",
@@ -259,19 +230,17 @@ async def websocket_handler(request):
                 if data.get("type") == "ping":
                     await ws.send_json({"type": "pong"})
 
-            elif msg.type in (
-                web.WSMsgType.ERROR,
-                web.WSMsgType.CLOSED,
-            ):
+            elif msg.type in (web.WSMsgType.ERROR, web.WSMsgType.CLOSED):
                 break
 
-    except Exception:
-        pass
+    except Exception as exc:
+        logging.warning("WebSocket error for %s: %r", device_id, exc)
     finally:
         if device_id:
             current = devices.get(device_id)
             if current and current.ws is ws:
                 devices.pop(device_id, None)
+                logging.info("Device offline: %s", device_id)
 
     return ws
 
@@ -288,7 +257,6 @@ async def start_telegram(app):
     await tg.initialize()
     await tg.start()
     await tg.updater.start_polling()
-
     app["telegram"] = tg
 
 
@@ -304,20 +272,13 @@ async def stop_telegram(app):
 
 def create_app():
     app = web.Application()
-
     app.router.add_get("/", root_handler)
     app.router.add_get("/health", health_handler)
     app.router.add_get("/ws", websocket_handler)
-
     app.on_startup.append(start_telegram)
     app.on_cleanup.append(stop_telegram)
-
     return app
 
 
 if __name__ == "__main__":
-    web.run_app(
-        create_app(),
-        host=HOST,
-        port=PORT,
-    )
+    web.run_app(create_app(), host=HOST, port=PORT)
